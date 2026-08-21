@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: vortyx-pulse-api
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn render_deploy:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: HF_API_TOKEN
+        value: ""  # Your HF token
+      - key: HF_MODEL_ID
+        value: "Anony7b/vortyx-pulse"
+    plan: standard
