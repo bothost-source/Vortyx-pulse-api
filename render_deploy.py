@@ -5,12 +5,14 @@ Production API with jailbreak guard + Hugging Face Inference API
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import os
 import re
 import time
 import requests
+import traceback
 
 app = FastAPI(title="Vortyx Pulse API", version="1.0.0")
 
@@ -27,11 +29,16 @@ HF_MODEL_ID = os.environ.get("HF_MODEL_ID", "Anony7b/vortyx-pulse")
 
 print("Loading Vortyx Pulse...")
 print(f"   HF Model: {HF_MODEL_ID}")
+print(f"   HF Token set: {bool(HF_API_TOKEN)}")
 print(f"   Jailbreak Guard: ACTIVE")
 
 API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
 
 def hf_generate(prompt, max_tokens=1000, temperature=0.7):
+    """Call Hugging Face Inference API with proper error handling."""
+    if not HF_API_TOKEN:
+        raise ValueError("HF_API_TOKEN environment variable is not set")
+
     headers = {
         "Authorization": f"Bearer {HF_API_TOKEN}",
         "Content-Type": "application/json"
@@ -45,19 +52,46 @@ def hf_generate(prompt, max_tokens=1000, temperature=0.7):
             "return_full_text": False
         }
     }
-    response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
+
+    try:
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
+    except requests.exceptions.RequestException as e:
+        raise ConnectionError(f"Failed to connect to HF API: {str(e)}")
+
     if response.status_code == 200:
         result = response.json()
         if isinstance(result, list) and len(result) > 0:
             return result[0].get("generated_text", "")
         return str(result)
+    elif response.status_code == 401:
+        raise PermissionError("Invalid HF_API_TOKEN. Check your Hugging Face token.")
+    elif response.status_code == 403:
+        raise PermissionError("HF API access forbidden. Model may be private or token lacks permissions.")
+    elif response.status_code == 404:
+        raise ValueError(f"Model '{HF_MODEL_ID}' not found on Hugging Face.")
     elif response.status_code == 503:
-        raise Exception("HF API: Model is loading. Try again in a few seconds.")
+        raise RuntimeError("HF API: Model is loading. Wait 30 seconds and retry.")
+    elif response.status_code == 429:
+        raise RuntimeError("HF API rate limit exceeded. Too many requests.")
     else:
-        raise Exception(f"HF API Error {response.status_code}: {response.text}")
+        raise RuntimeError(f"HF API Error {response.status_code}: {response.text[:200]}")
+
+# Custom exception handler to return JSON instead of 500
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    error_msg = f"{type(exc).__name__}: {str(exc)}"
+    print(f"ERROR: {error_msg}")
+    print(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": error_msg,
+            "detail": "Check server logs for full traceback"
+        }
+    )
 
 # Simple jailbreak guard
-import re
 class JailbreakGuard:
     def __init__(self):
         self.patterns = [
@@ -67,7 +101,7 @@ class JailbreakGuard:
             r'how to kill', r'steal (credit card|password)',
         ]
         self.regex = [re.compile(p, re.IGNORECASE) for p in self.patterns]
-    
+
     def scan(self, text):
         for pattern in self.regex:
             if pattern.search(text):
@@ -123,8 +157,8 @@ async def code(request: CodeRequest):
     system = f"You are Vortyx Pulse. Write clean {request.language} code. Wrap in markdown."
     prompt = f"{system}\n\nUser: {request.prompt}\n\nVortyx Pulse:"
     response = hf_generate(prompt, 1500, 0.3)
-    code_blocks = re.findall(r'```(?:\w+)?\n(.*?)```', response, re.DOTALL)
-    explanation = re.sub(r'```.*?```', '', response, flags=re.DOTALL).strip()
+    code_blocks = re.findall(r'`{3}(?:\w+)?\n(.*?)`{3}', response, re.DOTALL)
+    explanation = re.sub(r'`{3}.*?`{3}', '', response, flags=re.DOTALL).strip()
     return {"success": True, "code": code_blocks[0] if code_blocks else response, "explanation": explanation}
 
 @app.post("/chat")
